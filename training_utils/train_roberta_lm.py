@@ -11,6 +11,7 @@ from transformers import LineByLineTextDataset
 from transformers import RobertaConfig, RobertaForMaskedLM, RobertaTokenizerFast
 from tokenizers.implementations import ByteLevelBPETokenizer
 import time
+import datetime
 import json
 import argparse
 
@@ -99,7 +100,10 @@ def tokenize_and_train_roberta_lm(input_path, output_path, vocab_size=30_000, mi
 
 if __name__ == "__main__":
     start = time.time()
-    c_time = str(int(start))
+    c_time = c_time = str(datetime.datetime.fromtimestamp(start)).split(".")[0]\
+        .replace("-", "_")\
+        .replace(" ", "_")\
+        .replace(":", "_")
     parser = argparse.ArgumentParser(
         description="Train Roberta tokenizer and language model")
     parser.add_argument("config", help="training configuration file")

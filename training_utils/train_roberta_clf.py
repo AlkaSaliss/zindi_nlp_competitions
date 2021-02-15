@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from ignite.utils import convert_tensor
 from ignite.engine.engine import Engine
-from ignite.metrics import Loss, Accuracy, RunningAverage
+from ignite.metrics import Loss, Accuracy
 from ignite.engine import Events, create_supervised_evaluator
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import ModelCheckpoint, EarlyStopping
@@ -85,7 +85,7 @@ def run_training(model, optimizer, scheduler, output_path,
 
     # trainer
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    crit = nn.NLLLoss()
+    crit = nn.CrossEntropyLoss()
     metrics = {"accuracy": Accuracy(), "loss": Loss(crit)}
     trainer = create_supervised_trainer_with_pretraining(
         model, optimizer, crit, device=device, epochs_pretrain=epochs_pretrain)
@@ -108,9 +108,7 @@ def run_training(model, optimizer, scheduler, output_path,
 
     # training progress
     pbar = ProgressBar(persist=True)
-    RunningAverage(output_transform=lambda x: x).attach(trainer, 'loss')
-    # pbar.attach(trainer, metric_names="all")
-    pbar.attach(trainer, ["loss"])
+    pbar.attach(trainer, metric_names="all")
 
     # @trainer.on(Events.EPOCH_COMPLETED)
     def log_training_results(engine):

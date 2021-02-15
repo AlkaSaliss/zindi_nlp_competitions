@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from ignite.utils import convert_tensor
 from ignite.engine.engine import Engine
-from ignite.metrics import Loss, Accuracy
+from ignite.metrics import Loss, Accuracy, RunningAverage
 from ignite.engine import Events, create_supervised_evaluator
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import ModelCheckpoint, EarlyStopping
@@ -108,7 +108,9 @@ def run_training(model, optimizer, scheduler, output_path,
 
     # training progress
     pbar = ProgressBar(persist=True)
-    pbar.attach(trainer, metric_names="all")
+    RunningAverage(output_transform=lambda x: x).attach(trainer, 'loss')
+    # pbar.attach(trainer, metric_names="all")
+    pbar.attach(trainer, ["loss"])
 
     # @trainer.on(Events.EPOCH_COMPLETED)
     def log_training_results(engine):
@@ -122,6 +124,8 @@ def run_training(model, optimizer, scheduler, output_path,
             "Training Results - Epoch: {}  Loss: {:.6f}  Accuracy: {:.6f}".format(engine.state.epoch, train_loss, train_acc))
         pbar.log_message(
             "Validation Results - Epoch: {}  Loss: {:.6f}  Accuracy: {:.6f}".format(engine.state.epoch, val_loss, val_acc))
+        
+        pbar.n = pbar.last_print_n = 0
 
     trainer.add_event_handler(Events.EPOCH_COMPLETED, log_training_results)
 
@@ -165,6 +169,14 @@ def run_training(model, optimizer, scheduler, output_path,
     train_evaluator.run(train_loader)
     val_evaluator.run(val_loader)
 
+    _pretty_print("Evaluating best model")
+    pbar.log_message(
+            "Best model on training set - Loss: {:.6f}  Accuracy: {:.6f}"\
+                .format(train_evaluator.state.metrics["loss"], train_evaluator.state.metrics["accuracy"]))
+    pbar.log_message(
+            "Best model on validation set - Loss: {:.6f}  Accuracy: {:.6f}"\
+                .format(val_evaluator.state.metrics["loss"], val_evaluator.state.metrics["accuracy"]))
+
     return model, train_evaluator.state.metrics, val_evaluator.state.metrics
 
 
@@ -193,7 +205,7 @@ if __name__ == "__main__":
         .replace(":", "_")
 
     parser = argparse.ArgumentParser(
-        description="Trains a neural network using k-fold cross-validation, and makes inference on test set")
+        description="Trains transformer based model for classification")
     parser.add_argument("config", type=str,
                         help="Path to the json configuration file")
     args = parser.parse_args()

@@ -4,27 +4,29 @@ import pathlib
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 src_path = pathlib.Path.cwd().parent
 sys.path.append(str(src_path))
-from helpers import _pretty_print, seed_all
-from data_utils.text_data_loaders import map_label, get_roberta_dataloaders, get_roberta_inference
-from transformers import RobertaTokenizerFast
-import pandas as pd
-import glob
-from sklearn.model_selection import train_test_split
-import time
-import shutil
-import datetime
-import json
-from tqdm.auto import tqdm
-import argparse
-import torch
-import torch.nn as nn
-from ignite.utils import convert_tensor
-from ignite.engine.engine import Engine
-from ignite.metrics import Loss, Accuracy
-from ignite.engine import Events, create_supervised_evaluator
-from ignite.contrib.handlers import ProgressBar
-from ignite.handlers import ModelCheckpoint, EarlyStopping
+
 from ignite.contrib.handlers.tensorboard_logger import TensorboardLogger, OutputHandler
+from ignite.handlers import ModelCheckpoint, EarlyStopping
+from ignite.contrib.handlers import ProgressBar
+from ignite.engine import Events, create_supervised_evaluator
+from ignite.metrics import Loss, Accuracy
+from ignite.engine.engine import Engine
+from ignite.utils import convert_tensor
+import torch.nn as nn
+import torch.cuda.amp as amp
+import torch
+import argparse
+from tqdm.auto import tqdm
+import json
+import datetime
+import shutil
+import time
+from sklearn.model_selection import train_test_split
+import glob
+import pandas as pd
+from transformers import RobertaTokenizerFast
+from data_utils.text_data_loaders import map_label, get_roberta_dataloaders, get_roberta_inference
+from helpers import _pretty_print, seed_all
 
 
 
@@ -47,14 +49,17 @@ def _prepare_batch(batch, device=None, non_blocking=False):
 
 
 def create_supervised_trainer_with_pretraining(
-    model,
-    optimizer,
-    loss_fn,
-    device=None,
-    non_blocking=False,
-    prepare_batch= _prepare_batch,
-    output_transform=lambda x, y, y_pred, loss: loss.item(),
-    epochs_pretrain=None):
+        model,
+        optimizer,
+        loss_fn,
+        device=None,
+        non_blocking=False,
+        prepare_batch=_prepare_batch,
+        output_transform=lambda x, y, y_pred, loss: loss.item(),
+        epochs_pretrain=None,
+        mixed_precision=False):
+
+    grad_scaler = amp.GradScaler() if mixed_precision else None
 
     def _update(engine, batch):
         # the model must have a module named base_model
@@ -65,30 +70,39 @@ def create_supervised_trainer_with_pretraining(
             if engine.state.epoch == epochs_pretrain+1:  # set all params to trainable after pretraining
                 for p in model.base_model.parameters():
                     p.requires_grad = True
-        
+
         model.train()
         optimizer.zero_grad()
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
-        y_pred = model(x)
-        loss = loss_fn(y_pred, y)
-        loss.backward()
-        optimizer.step()
+
+        if mixed_precision:
+            with amp.autocast():
+                y_pred = model(x)
+                loss = loss_fn(y_pred, y)
+            grad_scaler.scale(loss).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+        else:
+            y_pred = model(x)
+            loss = loss_fn(y_pred, y)
+            loss.backward()
+            optimizer.step()
         return output_transform(x, y, y_pred, loss)
 
     trainer = Engine(_update)
     return trainer
 
 
-
 def run_training(model, optimizer, scheduler, output_path,
-                 train_loader, val_loader, epochs, patience, epochs_pretrain):
+                 train_loader, val_loader, epochs, patience, epochs_pretrain, mixed_precision):
 
     # trainer
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     crit = nn.CrossEntropyLoss()
     metrics = {"accuracy": Accuracy(), "loss": Loss(crit)}
     trainer = create_supervised_trainer_with_pretraining(
-        model, optimizer, crit, device=device, epochs_pretrain=epochs_pretrain)
+        model, optimizer, crit, device=device, epochs_pretrain=epochs_pretrain,
+        mixed_precision=mixed_precision)
     train_evaluator = create_supervised_evaluator(
         model, metrics=metrics, device=device)
     val_evaluator = create_supervised_evaluator(
@@ -122,7 +136,7 @@ def run_training(model, optimizer, scheduler, output_path,
             "Training Results - Epoch: {}  Loss: {:.6f}  Accuracy: {:.6f}".format(engine.state.epoch, train_loss, train_acc))
         pbar.log_message(
             "Validation Results - Epoch: {}  Loss: {:.6f}  Accuracy: {:.6f}".format(engine.state.epoch, val_loss, val_acc))
-        
+
         pbar.n = pbar.last_print_n = 0
 
     trainer.add_event_handler(Events.EPOCH_COMPLETED, log_training_results)
@@ -169,11 +183,11 @@ def run_training(model, optimizer, scheduler, output_path,
 
     _pretty_print("Evaluating best model")
     pbar.log_message(
-            "Best model on training set - Loss: {:.6f}  Accuracy: {:.6f}"\
-                .format(train_evaluator.state.metrics["loss"], train_evaluator.state.metrics["accuracy"]))
+        "Best model on training set - Loss: {:.6f}  Accuracy: {:.6f}"
+        .format(train_evaluator.state.metrics["loss"], train_evaluator.state.metrics["accuracy"]))
     pbar.log_message(
-            "Best model on validation set - Loss: {:.6f}  Accuracy: {:.6f}"\
-                .format(val_evaluator.state.metrics["loss"], val_evaluator.state.metrics["accuracy"]))
+        "Best model on validation set - Loss: {:.6f}  Accuracy: {:.6f}"
+        .format(val_evaluator.state.metrics["loss"], val_evaluator.state.metrics["accuracy"]))
 
     return model, train_evaluator.state.metrics, val_evaluator.state.metrics
 
@@ -218,6 +232,7 @@ if __name__ == "__main__":
     model_path = train_config["model_path"]
     epochs = train_config["epochs"]
     epochs_pretrain = train_config.get("epochs_pretrain")
+    mixed_precision = train_config.get("mixed_precision", False)
     patience = train_config["patience"]
     flag = train_config.get("flag", "xp")
     output_path = os.path.join(output_path, f"{flag}-{c_time}")
@@ -259,7 +274,8 @@ if __name__ == "__main__":
     _pretty_print("Training start")
     model, train_metrics, val_metrics = run_training(model, optimizer, scheduler,
                                                      output_path, train_loader,
-                                                     val_loader, epochs, patience, epochs_pretrain)
+                                                     val_loader, epochs, patience,
+                                                     epochs_pretrain, mixed_precision)
     end1 = time.time()
     duration1 = end1 - start
     m, s = divmod(duration1, 60)
@@ -269,7 +285,7 @@ if __name__ == "__main__":
     _pretty_print("Inference start")
     test_loader = get_roberta_inference(df_test, list_procs, text_col, tokenizer, max_length,
                                         val_batch_size, num_workers, pin_memory)
-    
+
     preds = run_inference(model, test_loader)
 
     df_sub = pd.DataFrame({

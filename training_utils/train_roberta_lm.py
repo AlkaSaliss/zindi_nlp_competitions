@@ -20,21 +20,20 @@ import argparse
 seed_all()
 
 
-def tokenize_and_train_roberta_lm(input_path, output_path, vocab_size=30_000, min_freq=2,
-                                  max_len=512, block_size=64, mlm_probability=0.15,
-                                  num_attention_heads=12, num_hidden_layers=6, epochs=5,
-                                  batch_size=30, **kwargs):
+def tokenize_and_train_roberta_lm(input_path, input_path_val, output_path, vocab_size=30_000, min_freq=2,
+                                  max_len=256, block_size=64, mlm_probability=0.15,
+                                  num_attention_heads=6, num_hidden_layers=3, epochs=5,
+                                  batch_size=30, val_batch_size=60, eval_steps=50, **kwargs):
     # instantiate tokenizer
     bpe_tokenizer = ByteLevelBPETokenizer()
     # train tokenizer
     _pretty_print("Training tokenizer")
-    bpe_tokenizer.train(input_path, vocab_size=vocab_size, min_frequency=min_freq, special_tokens=[
+    bpe_tokenizer.train([input_path, input_path_val], vocab_size=vocab_size, min_frequency=min_freq, special_tokens=[
         "<s>",
         "<pad>",
         "</s>",
         "<unk>",
         "<mask>",
-        "<rep>"
     ])
     # save tokenizer
     tok_path = os.path.join(output_path, "tokenizer")
@@ -49,6 +48,11 @@ def tokenize_and_train_roberta_lm(input_path, output_path, vocab_size=30_000, mi
     dataset_gen = LineByLineTextDataset(
         tokenizer=bpe_tokenizer,
         file_path=input_path,
+        block_size=block_size
+    )
+    dataset_gen_val = LineByLineTextDataset(
+        tokenizer=bpe_tokenizer,
+        file_path=input_path_val,
         block_size=block_size
     )
 
@@ -74,10 +78,14 @@ def tokenize_and_train_roberta_lm(input_path, output_path, vocab_size=30_000, mi
         overwrite_output_dir=True,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
-        # save_steps=50,
-        logging_steps=50,
+        per_device_eval_batch_size=val_batch_size,
+        evaluation_strategy="steps",
+        logging_steps=eval_steps,
+        eval_steps=eval_steps,
         save_total_limit=1,
-        # fp16=True,
+        load_best_model_at_end=True,
+        greater_is_better=False,
+        fp16=True,
         # dataloader_num_workers=4,
         # max_steps=100,
     )
@@ -87,6 +95,7 @@ def tokenize_and_train_roberta_lm(input_path, output_path, vocab_size=30_000, mi
         args=training_args,
         data_collator=data_collator,
         train_dataset=dataset_gen,
+        eval_dataset=dataset_gen_val
     )
 
     # train model

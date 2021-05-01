@@ -24,6 +24,7 @@ import time
 from sklearn.model_selection import train_test_split
 import glob
 import pandas as pd
+import numpy as np
 from transformers import RobertaTokenizerFast
 from data_utils.text_data_loaders import map_label, get_roberta_dataloaders, get_roberta_inference
 from helpers import _pretty_print, seed_all
@@ -94,11 +95,14 @@ def create_supervised_trainer_with_pretraining(
 
 
 def run_training(model, optimizer, scheduler, output_path,
-                 train_loader, val_loader, epochs, patience, epochs_pretrain, mixed_precision):
+                 train_loader, val_loader, epochs, patience,
+                  epochs_pretrain, mixed_precision, classes_weights):
 
     # trainer
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    crit = nn.CrossEntropyLoss()
+    if classes_weights is not None:
+        classes_weights = classes_weights.to(device)
+    crit = nn.CrossEntropyLoss(weight=classes_weights)
     metrics = {"accuracy": Accuracy(), "loss": Loss(crit)}
     trainer = create_supervised_trainer_with_pretraining(
         model, optimizer, crit, device=device, epochs_pretrain=epochs_pretrain,
@@ -248,6 +252,7 @@ if __name__ == "__main__":
     val_batch_size = train_config["val_batch_size"]
     num_workers = train_config["num_workers"]
     pin_memory = train_config.get("pin_memory", False)
+    balanced_classes = train_config.get("balanced_classes", False)
 
     _pretty_print("Loading data")
     df = pd.read_csv(input_path)
@@ -260,6 +265,15 @@ if __name__ == "__main__":
     train_loader, val_loader = get_roberta_dataloaders(df_train, df_val, list_procs,
                                                        text_col, label_col, tokenizer, max_length,
                                                        train_batch_size, val_batch_size, num_workers, pin_memory)
+
+    # prepare class_weigths
+    classes_weights = None
+    if balanced_classes:
+        val_counts = df_train[label_col].value_counts()
+        tmp_idx, tmp_vals = np.array(val_counts.index), val_counts.values
+        classes_weights = np.sum(tmp_vals)/tmp_vals
+        tmp_idx = np.array([map_label(i, False) for i in tmp_idx])
+        classes_weights = torch.FloatTensor(classes_weights[np.argsort(tmp_idx)])
 
     # load model
     dict_model = {}
@@ -275,7 +289,8 @@ if __name__ == "__main__":
     model, train_metrics, val_metrics = run_training(model, optimizer, scheduler,
                                                      output_path, train_loader,
                                                      val_loader, epochs, patience,
-                                                     epochs_pretrain, mixed_precision)
+                                                     epochs_pretrain, mixed_precision,
+                                                      classes_weights)
     end1 = time.time()
     duration1 = end1 - start
     m, s = divmod(duration1, 60)

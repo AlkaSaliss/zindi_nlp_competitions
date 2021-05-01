@@ -10,26 +10,24 @@ from functools import partial
 from helpers import compose_proc_funcs, seed_worker, DICT_TEXT_PREPROCESSORS
 
 
-def map_label(label, is_reverse):
-    dict_mapping = {
-        0: 0,
-        1: 1,
-        -1: 2
-    }
-    dict_mapping_reverse = {v: k for k, v in dict_mapping.items()}
+def map_label(label, is_reverse, dict_mapping):
     if is_reverse:
+        dict_mapping_reverse = {v: k for k, v in dict_mapping.items()}
         return dict_mapping_reverse[label]
     return dict_mapping[label]
 
 
 class TextDataGenerator(Dataset):
 
-    def __init__(self, df, text_col, label_col=None, list_procs=None):
+    def __init__(self, df, text_col, label_col=None, list_procs=None, dict_label=None):
 
         self.list_texts = list(df[text_col])
         self.label_col = label_col
         if label_col is not None:
+            assert dict_label is not None
             self.list_labels = list(df[label_col])
+            self.dict_label = dict_label
+
 
         list_proc_funcs = []
         if list_procs is not None:
@@ -46,7 +44,7 @@ class TextDataGenerator(Dataset):
         text = self.proc_func(self.list_texts[idx])
         if self.label_col is not None:
             label = self.list_labels[idx]
-            label = map_label(label, False)
+            label = map_label(label, False, self.dict_label)
             return text, label
         return text
 
@@ -69,11 +67,11 @@ def _collate_fn_roberta(batch, tokenizer, max_length, with_label=True):
 
 
 def get_roberta_dataloaders(df_train, df_val, list_procs,
-                            text_col, label_col, tokenizer, max_length,
+                            text_col, label_col, dict_label, tokenizer, max_length,
                             train_batch_size, val_batch_size, num_workers, pin_memory):
     train_dataset = TextDataGenerator(
-        df_train, text_col, label_col, list_procs)
-    val_dataset = TextDataGenerator(df_val, text_col, label_col, list_procs)
+        df_train, text_col, label_col, list_procs, dict_label)
+    val_dataset = TextDataGenerator(df_val, text_col, label_col, list_procs, dict_label)
 
     collate_fn = partial(_collate_fn_roberta,
                          tokenizer=tokenizer, max_length=max_length, with_label=True)

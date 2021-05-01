@@ -7,9 +7,9 @@ import re
 
 
 def _pretty_print(msg):
-	print("+-+"*30)
-	print("\t", msg)
-	print("+-+"*30+"\n")
+    print("+-+"*30)
+    print("\t", msg)
+    print("+-+"*30+"\n")
 
 SEED = 123
 

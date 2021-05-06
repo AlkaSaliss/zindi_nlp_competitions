@@ -245,24 +245,6 @@ def run_training(
     return model, train_evaluator.state.metrics, val_evaluator.state.metrics
 
 
-def run_inference(model, test_loader):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.eval()
-    model.to(device)
-
-    preds = []
-    with torch.no_grad():
-        for x_ids, x_mask in tqdm(test_loader):
-            pred = model((x_ids.to(device), x_mask.to(device)))
-            preds.append(pred.cpu())
-            del pred
-            _empty_cache()
-    preds = torch.cat(preds)
-    # _, preds = torch.topk(preds, 1, dim=1)
-    # preds = [map_label(item, True) for item in preds.numpy().flatten()]
-    return preds
-
-
 if __name__ == "__main__":
     start = time.time()
     c_time = (
@@ -285,15 +267,21 @@ if __name__ == "__main__":
     # prepare dataset
     input_path = train_config["input_path"]
     test_path = train_config["test_path"]
+    output_path = train_config["xp_path"]
+    current_fold = max(
+        [
+            int(pathlib.Path(p).stem.split("_")[-1])
+            for p in glob.glob(os.path.join(output_path, "fold*"))
+        ]
+    )
+    # remove current folds folder
+    shutil.rmtree(os.path.join(output_path, f"fold_{current_fold}"))
     n_folds = train_config.get("n_folds", 5)
-    output_path = train_config["output_path"]
-    model_path = train_config["model_path"]
+    model_path = os.path.join(output_path, "model_script.py")
     epochs = train_config["epochs"]
     epochs_pretrain = train_config.get("epochs_pretrain")
     mixed_precision = train_config.get("mixed_precision", False)
     patience = train_config["patience"]
-    flag = train_config.get("flag", "xp")
-    output_path = os.path.join(output_path, f"{flag}-{c_time}")
     os.makedirs(output_path, exist_ok=True)
     list_procs = train_config["list_procs"]
     text_col = train_config["text_col"]
@@ -327,8 +315,10 @@ if __name__ == "__main__":
     )
     # data splitting
     kfold_splitter = StratifiedKFold(n_splits=n_folds, random_state=123, shuffle=True)
-    
+
     for k, (train_inds, val_inds) in enumerate(kfold_splitter.split(df, df[label_col])):
+        if k < current_fold:
+            continue
         start_k = time.time()
         _pretty_print(f"FOLD {k} / {n_folds-1}")
         df_train, df_val = df.loc[train_inds], df.loc[val_inds]
@@ -363,9 +353,6 @@ if __name__ == "__main__":
         model = dict_model["model"]
         optimizer = dict_model["optimizer"]
         scheduler = dict_model.get("scheduler")
-        if k == 0:
-            shutil.copy(model_path, os.path.join(output_path, "model_script.py"))
-            train_config["model_script"] = os.path.join(output_path, "model_script.py")
 
         _pretty_print("Training start")
         output_path_k = os.path.join(output_path, f"fold_{k}")
@@ -388,53 +375,12 @@ if __name__ == "__main__":
         h, m = divmod(m, 60)
         _pretty_print(f"Training fold {k} took {h}h : {m}mn : {s}s ")
 
-        _pretty_print("Inference start")
-        preds_k = run_inference(model, test_loader)
-        list_all_preds.append(preds_k)
         del model
         _empty_cache()
-
-        duration2 = time.time() - end1
-        m, s = divmod(duration2, 60)
-        h, m = divmod(m, 60)
-        _pretty_print(f"Inference fold {k} took {h}h : {m}mn : {s}s ")
 
         train_config[f"train_metrics_fold_{k}"] = train_metrics
         train_config[f"val_metrics_fold_{k}"] = val_metrics
         train_config[f"train_time_fold_{k}"] = duration1
-        train_config[f"inference_time_fold_{k}"] = duration2
 
-    # compute final preds as average of k-folds
-    sub_path = os.path.join(output_path, f"sub_{flag}-{c_time}.csv")
-    final_preds = torch.stack(list_all_preds).mean(dim=0)
-    _, final_preds = torch.topk(final_preds, 1, dim=1)
-    final_preds = [
-        map_label(item, True, dict_label) for item in final_preds.numpy().flatten()
-    ]
-    df_sub[f"{label_col}"] = final_preds
-    df_sub.to_csv(sub_path, index=False)
-
-    # compute average metrics
-    train_metric_names = list(train_config["train_metrics_fold_0"].keys())
-    val_metric_names = list(train_config["val_metrics_fold_0"].keys())
-    train_metric_final, val_metric_final = dict(), dict()
-    for metric in train_metric_names:
-        train_metric_final[metric] = float(
-            np.mean(
-                [
-                    train_config[f"train_metrics_fold_{k}"][metric]
-                    for k in range(n_folds)
-                ]
-            )
-        )
-    for metric in val_metric_names:
-        val_metric_final[metric] = float(
-            np.mean(
-                [train_config[f"val_metrics_fold_{k}"][metric] for k in range(n_folds)]
-            )
-        )
-
-    train_config["train_metrics"] = train_metric_final
-    train_config["val_metrics"] = val_metric_final
     with open(os.path.join(output_path, "config.json"), "w") as f:
         json.dump(train_config, f, indent=2)
